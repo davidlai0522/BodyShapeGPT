@@ -19,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 DEFAULT_BASE_MODEL    = "meta-llama/Meta-Llama-3-8B"
 DEFAULT_WEIGHTS_DIR   = "weights"
-PROMPT_TEMPLATE       = "### Description: {description}\n ### Shape parameters: "
+SYSTEM_PROMPT         = "Convert the body description into 10 SMPL-X shape parameters."
 
 
 def parse_args():
@@ -76,7 +76,11 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
 
 
 def run_model(description: str, tokenizer, ft_model, max_new_tokens: int) -> str:
-    prompt = PROMPT_TEMPLATE.format(description=description)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": description},
+    ]
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     model_input = tokenizer(prompt, return_tensors="pt").to(ft_model.device)
     ft_model.eval()
     with torch.no_grad():
@@ -105,9 +109,10 @@ def main():
     betas = parse_betas(raw)
 
     print(f"Description : {args.description}")
+    print(f"Raw output  : {raw!r}")
     print(f"Shape params: {betas}")
     if len(betas) < 10:
-        print(f"[Warning] Only {len(betas)}/10 betas parsed — raw output: {raw!r}")
+        print(f"[Warning] Only {len(betas)}/10 betas parsed.")
 
 
 if __name__ == "__main__":
