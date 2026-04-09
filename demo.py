@@ -1,11 +1,11 @@
 """
 demo.py — Run inference with any fine-tuned LoRA model.
 
-Usage (original LLaMA-3-8B weights):
+Usage (Gemma 4 E4B weights):
     python demo.py "Average height person with broad shoulders"
 
 Usage (custom trained weights from train.py):
-    python demo.py --model Qwen/Qwen2.5-3B-Instruct --weights weights_new \
+    python demo.py --model google/gemma-4-E4B-it --weights weights_new \\
                    "Average height person with broad shoulders"
 """
 
@@ -15,9 +15,9 @@ import sys
 
 import torch
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 
-DEFAULT_BASE_MODEL    = "meta-llama/Meta-Llama-3-8B"
+DEFAULT_BASE_MODEL    = "google/gemma-4-E4B-it"
 DEFAULT_WEIGHTS_DIR   = "weights"
 SYSTEM_PROMPT         = "Convert the body description into 10 SMPL-X shape parameters."
 
@@ -47,7 +47,6 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
             model_id,
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            trust_remote_code=True,
         )
     else:
         bnb_config = BitsAndBytesConfig(
@@ -60,28 +59,26 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
             model_id,
             quantization_config=bnb_config,
             device_map="auto",
-            trust_remote_code=True,
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(
+    processor = AutoProcessor.from_pretrained(
         model_id,
-        trust_remote_code=True,
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
     ft_model = PeftModel.from_pretrained(base_model, weights_dir)
     print("[Load] Complete\n")
-    return tokenizer, ft_model
+    return processor, ft_model
 
 
-def run_model(description: str, tokenizer, ft_model, max_new_tokens: int) -> str:
+def run_model(description: str, processor, ft_model, max_new_tokens: int) -> str:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": description},
     ]
-    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    model_input = tokenizer(prompt, return_tensors="pt").to(ft_model.device)
+    prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    model_input = processor(text=prompt, return_tensors="pt").to(ft_model.device)
     ft_model.eval()
     with torch.no_grad():
         output_ids = ft_model.generate(
@@ -89,9 +86,9 @@ def run_model(description: str, tokenizer, ft_model, max_new_tokens: int) -> str
             max_new_tokens=max_new_tokens,
             do_sample=False,            # greedy decoding for reproducibility
             temperature=1.0,
-            pad_token_id=tokenizer.eos_token_id,
+            pad_token_id=processor.tokenizer.eos_token_id,
         )
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    return processor.decode(output_ids[0], skip_special_tokens=True)
 
 
 def parse_betas(text: str) -> list[float]:
@@ -104,8 +101,8 @@ def parse_betas(text: str) -> list[float]:
 def main():
     args = parse_args()
 
-    tokenizer, ft_model = load_model(args.model, args.weights, args.no_quantize)
-    raw = run_model(args.description, tokenizer, ft_model, args.max_new_tokens)
+    processor, ft_model = load_model(args.model, args.weights, args.no_quantize)
+    raw = run_model(args.description, processor, ft_model, args.max_new_tokens)
     betas = parse_betas(raw)
 
     print(f"Description : {args.description}")
