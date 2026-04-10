@@ -28,3 +28,6 @@ trl>=0.11.0           # SFTTrainer for supervised fine-tuning
 datasets>=2.21.0      # HuggingFace datasets (load_dataset, Dataset.from_list)
 
 smplx
+torch
+trimesh
+scipy

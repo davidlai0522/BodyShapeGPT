@@ -19,7 +19,8 @@ from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 
 DEFAULT_BASE_MODEL    = "google/gemma-4-E4B-it"
 DEFAULT_WEIGHTS_DIR   = "weights"
-SYSTEM_PROMPT         = "Convert the body description into 10 SMPL-X shape parameters."
+# Must match the PROMPT_TEMPLATE used during training (without the shape_params part)
+PROMPT_PREFIX         = "### Description: {description}\n ### Shape parameters: "
 
 
 def parse_args():
@@ -32,7 +33,7 @@ def parse_args():
                    help=f"Base model HuggingFace ID (default: {DEFAULT_BASE_MODEL})")
     p.add_argument("--weights", default=DEFAULT_WEIGHTS_DIR,
                    help=f"Path to LoRA adapter directory (default: {DEFAULT_WEIGHTS_DIR})")
-    p.add_argument("--max-new-tokens", type=int, default=100, dest="max_new_tokens")
+    p.add_argument("--max-new-tokens", type=int, default=400, dest="max_new_tokens")
     p.add_argument("--no-quantize", action="store_true", dest="no_quantize",
                    help="Disable 4-bit quantization (requires more VRAM but faster on big GPUs)")
     return p.parse_args()
@@ -45,7 +46,7 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
     if no_quantize:
         base_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
         )
     else:
@@ -64,8 +65,11 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
     processor = AutoProcessor.from_pretrained(
         model_id,
     )
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    # AutoProcessor may return a plain tokenizer (e.g. Qwen) or a processor
+    # wrapping one (e.g. Gemma multimodal). Normalise to a single tokenizer ref.
+    tokenizer = getattr(processor, "tokenizer", processor)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     ft_model = PeftModel.from_pretrained(base_model, weights_dir)
     print("[Load] Complete\n")
@@ -73,22 +77,22 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
 
 
 def run_model(description: str, processor, ft_model, max_new_tokens: int) -> str:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": description},
-    ]
-    prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    # Use the same raw template format the model was fine-tuned on
+    prompt = PROMPT_PREFIX.format(description=description.strip())
     model_input = processor(text=prompt, return_tensors="pt").to(ft_model.device)
     ft_model.eval()
+    tokenizer = getattr(processor, "tokenizer", processor)
     with torch.no_grad():
         output_ids = ft_model.generate(
             **model_input,
             max_new_tokens=max_new_tokens,
             do_sample=False,            # greedy decoding for reproducibility
             temperature=1.0,
-            pad_token_id=processor.tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id,
+            stop_strings=["\n ###", "\n\n"],  # stop before hallucinated follow-up sections
+            tokenizer=tokenizer,
         )
-    return processor.decode(output_ids[0], skip_special_tokens=True)
+    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
 
 def parse_betas(text: str) -> list[float]:
