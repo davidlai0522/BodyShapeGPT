@@ -4,4 +4,52 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "accelerate>=0.34.2",
+    "bitsandbytes>=0.43.3",
+    "certifi>=2024.8.30",
+    "filelock>=3.16.0",
+    "fsspec>=2024.9.0",
+    "huggingface-hub>=0.24.6",
+    "Jinja2>=3.1.4",
+    "mpmath>=1.3.0",
+    "numpy>=1.26.0",
+    "packaging>=24.1",
+    "peft>=0.12.0",
+    "psutil>=6.0.0",
+    "PyYAML>=6.0.2",
+    "regex>=2024.7.24",
+    "requests>=2.32.3",
+    "safetensors>=0.4.5",
+    "sympy>=1.13.2",
+    "tokenizers>=0.19.1",
+    "torch==2.9.0",
+    "tqdm>=4.66.5",
+    "transformers>=4.44.2",
+    "triton>=3.0.0",
+    "typing_extensions>=4.12.2",
+    "trl>=0.11.0",
+    "datasets>=2.21.0",
+    "smplx",
+    "trimesh",
+    "scipy",
+    "PyQt5",
+    "pyvista",
+    "pyvistaqt",
+    "vtk",
+    "chumpy",
+]
+
+[tool.uv.sources]
+chumpy = { path = "3rdParty/chumpy" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.extra-build-dependencies]
+file = ["pip"]

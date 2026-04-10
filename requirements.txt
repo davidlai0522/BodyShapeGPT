@@ -31,3 +31,7 @@ smplx
 torch
 trimesh
 scipy
+PyQt5
+pyqtgraph
+PyOpenGL 
+PyOpenGL_accelerate

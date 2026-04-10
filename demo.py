@@ -5,7 +5,7 @@ Usage (Gemma 4 E4B weights):
     python demo.py "Average height person with broad shoulders"
 
 Usage (custom trained weights from train.py):
-    python demo.py --model google/gemma-4-E4B-it --weights weights_new \\
+    python demo.py --model Qwen/Qwen2.5-3B --weights weights_qwen_base_new \\
                    "Average height person with broad shoulders"
 """
 
@@ -17,25 +17,38 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 
-DEFAULT_BASE_MODEL    = "google/gemma-4-E4B-it"
-DEFAULT_WEIGHTS_DIR   = "weights"
+DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-3B"
+DEFAULT_WEIGHTS_DIR = "weights_qwen_base_new"
 # Must match the PROMPT_TEMPLATE used during training (without the shape_params part)
-PROMPT_PREFIX         = "### Description: {description}\n ### Shape parameters: "
+PROMPT_PREFIX = "### Description: {description}\n ### Shape parameters: "
 
 
 def parse_args():
     p = argparse.ArgumentParser(
         description="BodyShapeGPT inference — generate SMPL-X shape params from text."
     )
-    p.add_argument("description", type=str,
-                   help="Natural language description of the avatar body shape.")
-    p.add_argument("--model", default=DEFAULT_BASE_MODEL,
-                   help=f"Base model HuggingFace ID (default: {DEFAULT_BASE_MODEL})")
-    p.add_argument("--weights", default=DEFAULT_WEIGHTS_DIR,
-                   help=f"Path to LoRA adapter directory (default: {DEFAULT_WEIGHTS_DIR})")
+    p.add_argument(
+        "description",
+        type=str,
+        help="Natural language description of the avatar body shape.",
+    )
+    p.add_argument(
+        "--model",
+        default=DEFAULT_BASE_MODEL,
+        help=f"Base model HuggingFace ID (default: {DEFAULT_BASE_MODEL})",
+    )
+    p.add_argument(
+        "--weights",
+        default=DEFAULT_WEIGHTS_DIR,
+        help=f"Path to LoRA adapter directory (default: {DEFAULT_WEIGHTS_DIR})",
+    )
     p.add_argument("--max-new-tokens", type=int, default=400, dest="max_new_tokens")
-    p.add_argument("--no-quantize", action="store_true", dest="no_quantize",
-                   help="Disable 4-bit quantization (requires more VRAM but faster on big GPUs)")
+    p.add_argument(
+        "--no-quantize",
+        action="store_true",
+        dest="no_quantize",
+        help="Disable 4-bit quantization (requires more VRAM but faster on big GPUs)",
+    )
     return p.parse_args()
 
 
@@ -68,8 +81,19 @@ def load_model(model_id: str, weights_dir: str, no_quantize: bool):
     # AutoProcessor may return a plain tokenizer (e.g. Qwen) or a processor
     # wrapping one (e.g. Gemma multimodal). Normalise to a single tokenizer ref.
     tokenizer = getattr(processor, "tokenizer", processor)
-    if tokenizer.pad_token is None:
+    if hasattr(tokenizer, "pad_token") and tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    # Sanitize _no_split_modules to circumvent accelerate bug with sets
+    if hasattr(base_model, "_no_split_modules"):
+        if isinstance(base_model._no_split_modules, (set, list)):
+            sanitized = []
+            for item in base_model._no_split_modules:
+                if isinstance(item, (set, list)):
+                    sanitized.extend(list(item))
+                else:
+                    sanitized.append(item)
+            base_model._no_split_modules = list(set(sanitized))
 
     ft_model = PeftModel.from_pretrained(base_model, weights_dir)
     print("[Load] Complete\n")
@@ -86,10 +110,13 @@ def run_model(description: str, processor, ft_model, max_new_tokens: int) -> str
         output_ids = ft_model.generate(
             **model_input,
             max_new_tokens=max_new_tokens,
-            do_sample=False,            # greedy decoding for reproducibility
+            do_sample=False,  # greedy decoding for reproducibility
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
-            stop_strings=["\n ###", "\n\n"],  # stop before hallucinated follow-up sections
+            stop_strings=[
+                "\n ###",
+                "\n\n",
+            ],  # stop before hallucinated follow-up sections
             tokenizer=tokenizer,
         )
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
