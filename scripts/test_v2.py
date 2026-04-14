@@ -10,31 +10,30 @@ class LLMToSMPLRegressor(nn.Module):
     def __init__(self, base_model, hidden_size):
         super().__init__()
         self.llm = base_model
-        
         self.regressor = nn.Sequential(
             nn.Linear(hidden_size, 512),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(512, 10)
         )
-    
+        # Must be present even at inference — it's part of the saved state dict
+        self.register_buffer(
+            "loss_weights",
+            torch.ones(10, dtype=torch.float32)
+        )
+
     def forward(self, input_ids, attention_mask):
         outputs = self.llm(input_ids=input_ids, attention_mask=attention_mask)
-        
         hidden_states = outputs.last_hidden_state
-        sequence_lengths = attention_mask.sum(dim=1) - 1
-        batch_size = input_ids.shape[0]
-        
-        last_token_states = hidden_states[torch.arange(batch_size), sequence_lengths]
-        
-        # --- THE FIX: Cast the hidden states to match the regressor's dtype ---
-        last_token_states = last_token_states.to(self.regressor[0].weight.dtype)
-        # ----------------------------------------------------------------------
-        
-        predicted_betas = self.regressor(last_token_states)
-        
-        return predicted_betas
 
+        # Mean pooling — must match training forward()
+        mask_expanded = attention_mask.unsqueeze(-1).float()
+        sum_hidden = (hidden_states * mask_expanded).sum(dim=1)
+        mean_hidden = sum_hidden / mask_expanded.sum(dim=1).clamp(min=1e-9)
+        mean_hidden = mean_hidden.to(torch.float32)
+
+        return self.regressor(mean_hidden)
+    
 # ==========================================
 # 2. Setup and Load Weights
 # ==========================================
@@ -58,7 +57,7 @@ base_llm = AutoModel.from_pretrained(
 lora_config = LoraConfig(
     r=16,
     lora_alpha=32,
-    target_modules=["q_proj", "v_proj"],
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # must match training
     lora_dropout=0.05,
     bias="none",
 )
