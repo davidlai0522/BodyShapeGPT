@@ -12,7 +12,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # ==========================================
 # 1. Define the Custom Regression Model
@@ -88,17 +88,18 @@ class UnfreezeCallback(TrainerCallback):
     def on_epoch_begin(self, args, state, control, model=None, **kwargs):
         if not self._unfrozen and state.epoch >= self.unfreeze_epoch:
             print(f"\n[UnfreezeCallback] Unfreezing LLM at epoch {state.epoch:.0f}")
-            for param in model.llm.parameters():
-                param.requires_grad = True
+            # for param in model.llm.parameters():
+            #     param.requires_grad = True
             self._unfrozen = True
 
 
 # ==========================================
 # 3. Setup and Configuration
 # ==========================================
-MODEL_NAME = "Qwen/Qwen2.5-3B"
+# MODEL_NAME = "Qwen/Qwen2.5-3B"
+MODEL_NAME = "Qwen/Qwen2.5-0.5B" 
 DATA_FILE = "./BodyShapeGPT_dataset.jsonl"
-OUTPUT_DIR = "./smpl_regressor_checkpoints_v3"
+OUTPUT_DIR = "./smpl_regressor_checkpoints_v3_1"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 if tokenizer.pad_token is None:
@@ -113,8 +114,10 @@ base_llm = AutoModel.from_pretrained(
 # CHANGE: Reduced r=8 (from 16) to lower memorization capacity.
 # lora_alpha kept at 2x r as convention.
 lora_config = LoraConfig(
-    r=8,
-    lora_alpha=16,
+    # r=8,
+    r=12,          # between 8 (underfit) and 16 (overfit)
+    # lora_alpha=16,
+    lora_alpha=24,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     lora_dropout=0.05,
     bias="none",
@@ -187,7 +190,8 @@ training_args = TrainingArguments(
     # Reduced from 3e-4 — the high LR caused grad_norm=inf (GradScaler overflow)
     # once the LLM was unfrozen at epoch 2, skipping most optimizer steps.
     # 5e-5 is standard for LoRA fine-tuning of 3B models.
-    learning_rate=5e-5,
+    # learning_rate=5e-5,
+    learning_rate=1e-4,
 
     # Keep high — early stopping will terminate before 20 if needed
     num_train_epochs=20,
@@ -199,8 +203,7 @@ training_args = TrainingArguments(
     # and is the most direct overfitting countermeasure
     weight_decay=0.01,
 
-    # Aggressive gradient clipping to prevent fp16 overflow (grad_norm=inf)
-    max_grad_norm=0.5,
+    max_grad_norm=1.0,   # clip gradients, prevents the 100+ spikes
 
     eval_strategy="epoch",
     save_strategy="epoch",
@@ -229,7 +232,7 @@ trainer = Trainer(
         # Stops training if eval_loss doesn't improve for 4 consecutive epochs
         EarlyStoppingCallback(early_stopping_patience=4),
         # Unfreezes LLM after epoch 2 once the regression head has stabilized
-        UnfreezeCallback(unfreeze_epoch=2),
+        # UnfreezeCallback(unfreeze_epoch=2),
     ]
 )
 
