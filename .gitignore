@@ -5,4 +5,5 @@
 weights_qwen
 weights/smpl*
 smpl/
-*.npyBodyShapeGPT_dataset_1M.jsonl
+*.npy
+BodyShapeGPT_dataset_1M.jsonl
