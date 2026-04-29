@@ -41,6 +41,8 @@ import random
 import sys
 from pathlib import Path
 
+import yaml
+
 import numpy as np
 import torch
 import smplx
@@ -231,6 +233,74 @@ SHAPE_PHRASES: dict[str, list[str]] = {
         "a V-shaped build",
     ],
 }
+
+
+def _apply_vocab_overrides(cfg: dict) -> None:
+    """
+    Mutate the global ADJ and SHAPE_PHRASES with user-supplied overrides.
+
+    Overrides can come from two places (both optional, both applied if present):
+      1. A separate YAML/JSON file pointed to by cfg["vocab_file"].
+      2. Inline "adj" / "shape_phrases" keys inside cfg itself.
+
+    Deep-merge semantics:
+      - adj:           only the listed attr→category pairs are replaced; the
+                       rest of ADJ is left untouched.
+      - shape_phrases: only the listed shape keys are replaced.
+    """
+    sources: list[dict] = []
+
+    # 1. External vocab file
+    vocab_path = cfg.get("vocab_file")
+    if vocab_path:
+        p = Path(vocab_path)
+        if not p.is_absolute():
+            p = _ROOT_DIR / p
+        if not p.exists():
+            print(f"Warning: vocab_file not found: {p}", file=sys.stderr)
+        else:
+            with p.open() as f:
+                if p.suffix in (".yaml", ".yml"):
+                    sources.append(yaml.safe_load(f) or {})
+                else:
+                    sources.append(json.load(f))
+
+    # 2. Inline keys in the main config
+    sources.append(cfg)
+
+    for src in sources:
+        # --- ADJ overrides ---
+        adj_patch = src.get("adj") or {}
+        for attr, cat_map in adj_patch.items():
+            if attr not in ADJ:
+                print(f"Warning: unknown adj attribute '{attr}' — skipping",
+                      file=sys.stderr)
+                continue
+            if not isinstance(cat_map, dict):
+                continue
+            for cat, phrases in cat_map.items():
+                if cat not in CATEGORIES:
+                    print(f"Warning: unknown category '{cat}' for '{attr}' — skipping",
+                          file=sys.stderr)
+                    continue
+                if not isinstance(phrases, list) or not phrases:
+                    print(f"Warning: adj[{attr}][{cat}] must be a non-empty list — skipping",
+                          file=sys.stderr)
+                    continue
+                ADJ[attr][cat] = phrases
+
+        # --- SHAPE_PHRASES overrides ---
+        sp_patch = src.get("shape_phrases") or {}
+        for shape, phrases in sp_patch.items():
+            if shape not in SHAPE_PHRASES:
+                print(f"Warning: unknown shape '{shape}' — skipping", file=sys.stderr)
+                continue
+            if not isinstance(phrases, list) or not phrases:
+                print(f"Warning: shape_phrases[{shape}] must be a non-empty list — skipping",
+                      file=sys.stderr)
+                continue
+            SHAPE_PHRASES[shape] = phrases
+
 
 # ---------------------------------------------------------------------------
 # Measurement extraction
@@ -472,62 +542,91 @@ def _pick(attr: str, cat: str) -> str:
     return random.choice(ADJ[attr][cat])
 
 
-def _select_attrs(cats: dict[str, str], n_extra: int = None) -> list[str]:
+def _select_attrs(
+    cats: dict[str, str],
+    n_extra_min: int = 1,
+    n_extra_max: int = 3,
+    focus_attrs: list[str] | None = None,
+) -> list[str]:
     """
-    Select a subset of attributes to mention.
-    - Height is always included.
-    - Extra attributes are sampled, biased toward non-average values.
+    Select a subset of attributes to mention (excluding height, which is always present).
+
+    - focus_attrs: attributes always included in the output (e.g. ["bmi_proxy"]).
+    - n_extra_min / n_extra_max: range for the *total* number of extra attributes;
+      focus_attrs count toward that total.
+    - Remaining slots are filled by weighted random sampling, biased toward
+      non-average values for lexical variety.
     """
-    extras = [k for k in MEAS_KEYS if k != "height"]
-    # Weight extremes more heavily so dataset is not dominated by "average X"
-    weights = [3.0 if cats[k] in ("very_low", "very_high") else
-               1.5 if cats[k] in ("low", "high") else
-               0.6 for k in extras]
-    if n_extra is None:
-        n_extra = random.randint(1, 3)
-    n_extra = min(n_extra, len(extras))
-    w = np.array(weights, dtype=float)
-    w /= w.sum()
-    chosen = np.random.choice(extras, size=n_extra, replace=False, p=w).tolist()
-    random.shuffle(chosen)
-    return chosen
+    pinned = [a for a in (focus_attrs or []) if a != "height" and a in MEAS_KEYS]
+    n_extra = random.randint(n_extra_min, n_extra_max)
+    n_random = max(0, n_extra - len(pinned))
+
+    pool = [k for k in MEAS_KEYS if k != "height" and k not in pinned]
+    if n_random > 0 and pool:
+        weights = [3.0 if cats[k] in ("very_low", "very_high") else
+                   1.5 if cats[k] in ("low", "high") else
+                   0.6 for k in pool]
+        n_random = min(n_random, len(pool))
+        w = np.array(weights, dtype=float)
+        w /= w.sum()
+        sampled = np.random.choice(pool, size=n_random, replace=False, p=w).tolist()
+    else:
+        sampled = []
+
+    result = pinned + sampled
+    random.shuffle(result)
+    return result
 
 
 def _join_phrases(phrases: list[str]) -> str:
-    """Join 1-n phrases with commas and 'and'."""
+    """Join 0-n phrases with commas and 'and'. Returns '' for empty list."""
+    if not phrases:
+        return ""
     if len(phrases) == 1:
         return phrases[0]
     return ", ".join(phrases[:-1]) + ", and " + phrases[-1]
 
 
-def _generate_description(cats: dict[str, str], body_shape: str) -> str:
+def _generate_description(
+    cats: dict[str, str],
+    body_shape: str,
+    shape_prob: float = 0.65,
+    n_extra_min: int = 1,
+    n_extra_max: int = 3,
+    focus_attrs: list[str] | None = None,
+) -> str:
     """Build one natural-language sentence from measurement categories and body shape."""
     height_cat  = cats["height"]
     h_phrase    = _pick("height", height_cat)
     sp          = random.choice(SHAPE_PHRASES[body_shape])
 
-    extra_keys   = _select_attrs(cats)
+    extra_keys   = _select_attrs(cats, n_extra_min, n_extra_max, focus_attrs)
     attr_phrases = [_pick(k, cats[k]) for k in extra_keys]
+    has_attrs    = bool(attr_phrases)
 
-    include_shape = random.random() < 0.65   # 65 % of descriptions name the shape
+    include_shape = random.random() < shape_prob
 
     if include_shape:
         # ---- Templates that include the body-shape phrase ----
-        shape_templates = [
+        # Attr-less variants (S1, S3, S7) are always eligible.
+        # Variants that use attr_phrases are only added when attrs are present.
+        shape_templates_noattrs = [
             # S1. "A [height] person with [shape]."
             lambda h, ap, s: f"A {h} person with {s}.",
-            # S2. "A [height] person with [shape] and X, Y."
-            lambda h, ap, s: f"A {h} person with {s} and {_join_phrases(ap)}.",
             # S3. "[Height] individual with [shape]."
             lambda h, ap, s: f"{h.capitalize()} individual with {s}.",
+            # S7. "A [height] frame with [shape]."
+            lambda h, ap, s: f"A {h} frame with {s}.",
+        ]
+        shape_templates_withattrs = [
+            # S2. "A [height] person with [shape] and X, Y."
+            lambda h, ap, s: f"A {h} person with {s} and {_join_phrases(ap)}.",
             # S4. "[Height] person featuring [shape] and X, Y."
             lambda h, ap, s: f"{h.capitalize()} person featuring {s} and {_join_phrases(ap)}.",
             # S5. "A [height] person. They have [shape] with X, Y."
             lambda h, ap, s: f"A {h} person. They have {s} with {_join_phrases(ap)}.",
             # S6. "[Shape], [height], X and Y."
             lambda h, ap, s: f"{s.capitalize()}, {h}, {_join_phrases(ap)}.",
-            # S7. "A [height] frame with [shape]."
-            lambda h, ap, s: f"A {h} frame with {s}.",
             # S8. "[Height] person with [shape] — X and Y."
             lambda h, ap, s: f"{h.capitalize()} person with {s} — {_join_phrases(ap)}.",
             # S9. Lead with weight if extreme, then shape
@@ -538,10 +637,18 @@ def _generate_description(cats: dict[str, str], body_shape: str) -> str:
                 else f"A {h} person with {s} and {_join_phrases(ap)}."
             ),
         ]
-        template = random.choice(shape_templates)
+        pool = shape_templates_noattrs + (shape_templates_withattrs if has_attrs else [])
+        template = random.choice(pool)
         return template(h_phrase, attr_phrases, sp)
     else:
-        # ---- Original templates (no explicit shape label) ----
+        # ---- Templates without an explicit shape label ----
+        if not has_attrs:
+            # Fallback: height-only sentences
+            return random.choice([
+                f"A {h_phrase} person.",
+                f"{h_phrase.capitalize()} individual.",
+                f"A {h_phrase} frame.",
+            ])
         plain_templates = [
             # 1. "A [height] person with X, Y, and Z."
             lambda h, ap: f"A {h} person with {_join_phrases(ap)}.",
@@ -681,12 +788,17 @@ class LLMRephraser:
 def generate_dataset(
     n_samples:    int,
     output_file:  str,
-    gender:       str     = "neutral",
-    batch_size:   int     = 128,
-    n_calib:      int     = 5000,
-    rephrase:     bool    = False,
-    rephrase_model: str   = "Qwen/Qwen2.5-1.5B-Instruct",
-    seed:         int     = 42,
+    gender:       str        = "neutral",
+    batch_size:   int        = 128,
+    n_calib:      int        = 5000,
+    rephrase:     bool       = False,
+    rephrase_model: str      = "Qwen/Qwen2.5-1.5B-Instruct",
+    seed:         int        = 42,
+    # --- Description style ---
+    shape_prob:   float      = 0.65,
+    n_extra_min:  int        = 1,
+    n_extra_max:  int        = 3,
+    focus_attrs:  list[str] | None = None,
 ) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -739,7 +851,13 @@ def generate_dataset(
 
                 cats       = measurements_to_categories(meas, thresholds)
                 body_shape = classify_body_shape(meas, thresholds)
-                desc       = _generate_description(cats, body_shape)
+                desc       = _generate_description(
+                    cats, body_shape,
+                    shape_prob=shape_prob,
+                    n_extra_min=n_extra_min,
+                    n_extra_max=n_extra_max,
+                    focus_attrs=focus_attrs,
+                )
 
                 if rephraser is not None:
                     desc = rephraser.rephrase(desc, cats)
@@ -936,11 +1054,52 @@ def validate_dataset(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _load_config(path: str) -> dict:
+    """Load a YAML or JSON config file and return it as a dict."""
+    p = Path(path)
+    if not p.exists():
+        print(f"Config file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    with p.open() as f:
+        if p.suffix in (".yaml", ".yml"):
+            cfg = yaml.safe_load(f) or {}
+        elif p.suffix == ".json":
+            cfg = json.load(f)
+        else:
+            print(f"Unsupported config format: {p.suffix}  (use .yaml, .yml, or .json)",
+                  file=sys.stderr)
+            sys.exit(1)
+    # Normalise hyphenated keys to underscored (n-calib → n_calib, etc.)
+    return {k.replace("-", "_"): v for k, v in cfg.items()}
+
+
 def main() -> None:
+    # Pre-parse to detect --config before building the full parser,
+    # so config values can be injected as parser defaults.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=str, default=None,
+                     help="Path to a YAML/JSON config file (values act as defaults)")
+    pre_args, _ = pre.parse_known_args()
+    cfg_defaults: dict = _load_config(pre_args.config) if pre_args.config else {}
+
+    # Apply vocabulary overrides early so they're active for the whole run.
+    # Also honour --vocab-file passed directly on the CLI (pre-parse it too).
+    pre2 = argparse.ArgumentParser(add_help=False)
+    pre2.add_argument("--vocab-file", type=str, default=None)
+    pre2_args, _ = pre2.parse_known_args()
+    vocab_cfg = dict(cfg_defaults)
+    if pre2_args.vocab_file:
+        vocab_cfg["vocab_file"] = pre2_args.vocab_file
+    _apply_vocab_overrides(vocab_cfg)
+
     parser = argparse.ArgumentParser(
         description="BodyShapeGPT Dataset Generator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--config",     type=str,   default=None,
+                        help="Path to a YAML/JSON config file")
+    parser.add_argument("--vocab-file", type=str,   default=None,
+                        help="Path to a YAML/JSON file with adj/shape_phrases overrides")
     parser.add_argument("--n",       type=int,   default=21_000,
                         help="Number of samples to generate")
     parser.add_argument("--output",  type=str,   default="BodyShapeGPT_dataset_new.jsonl",
@@ -965,7 +1124,33 @@ def main() -> None:
     )
     parser.add_argument("--validate-n", type=int, default=200,
                         help="Number of samples to audit in validation mode")
+
+    # --- Description style ---
+    parser.add_argument("--shape-prob", type=float, default=0.65,
+                        help="Probability (0–1) of naming the body shape type in a description")
+    parser.add_argument("--n-extra-min", type=int, default=1,
+                        help="Minimum number of extra attributes to mention (besides height)")
+    parser.add_argument("--n-extra-max", type=int, default=3,
+                        help="Maximum number of extra attributes to mention (besides height)")
+    parser.add_argument("--focus-attrs", type=str, default=None,
+                        help="Comma-separated list of attributes that are always included "
+                             "(e.g. 'bmi_proxy,shoulder_width'). "
+                             f"Valid keys: {', '.join(MEAS_KEYS)}")
+
+    # Apply config file values as defaults (CLI args still override them)
+    if cfg_defaults:
+        parser.set_defaults(**cfg_defaults)
+
     args = parser.parse_args()
+
+    # Parse focus_attrs: accept both comma-separated string (CLI) and list (config file)
+    raw_focus = getattr(args, "focus_attrs", None)
+    if isinstance(raw_focus, str):
+        focus_attrs = [a.strip() for a in raw_focus.split(",") if a.strip()] or None
+    elif isinstance(raw_focus, list):
+        focus_attrs = raw_focus or None
+    else:
+        focus_attrs = None
 
     if args.validate:
         if not os.path.exists(args.output):
@@ -982,6 +1167,10 @@ def main() -> None:
             rephrase       = args.rephrase,
             rephrase_model = args.rephrase_model,
             seed           = args.seed,
+            shape_prob     = args.shape_prob,
+            n_extra_min    = args.n_extra_min,
+            n_extra_max    = args.n_extra_max,
+            focus_attrs    = focus_attrs,
         )
 
 

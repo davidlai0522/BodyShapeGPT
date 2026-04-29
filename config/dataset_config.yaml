@@ -1,0 +1,62 @@
+# BodyShapeGPT Dataset Generation Config
+# All values here act as defaults; any CLI flag still takes precedence.
+# Keys match the long CLI option names (hyphens or underscores both work).
+
+# --- Output ---
+n: 21000
+output: BodyShapeGPT_dataset_new.jsonl
+
+# --- Vocabulary overrides (optional) ---
+# Uncomment to load adj / shape_phrases overrides from a separate file.
+# vocab_file: config/vocab_config.yaml
+
+# --- SMPL settings ---
+gender: neutral          # neutral | male | female
+
+# --- Performance ---
+batch: 128               # SMPL forward-pass batch size
+n_calib: 5000            # samples used to calibrate percentile thresholds
+seed: 42
+
+# --- LLM rephrasing (optional) ---
+rephrase: false
+rephrase_model: Qwen/Qwen2.5-1.5B-Instruct
+
+# --- Validation mode ---
+validate: false
+validate_n: 200
+
+# --- Description style ---
+# shape_prob:   probability (0–1) of naming the body-shape type in each description.
+# n_extra_min:  minimum number of body attributes to mention (besides height).
+# n_extra_max:  maximum number of body attributes to mention (besides height).
+# focus_attrs:  attributes that are ALWAYS included (comma-separated string or YAML list).
+#               Valid keys: height, neck_length, arm_length, leg_length, shoulder_width,
+#                           hip_width, waist_depth, chest_depth, arm_girth, leg_girth,
+#                           bmi_proxy
+#
+# Preset examples (uncomment one block at a time):
+
+# Default — balanced variety
+shape_prob: 0.65
+n_extra_min: 1
+n_extra_max: 3
+focus_attrs: []
+
+# --- Short + body-shape focused (e.g. for shape-classification training) ---
+# shape_prob: 1.0
+# n_extra_min: 0
+# n_extra_max: 1
+# focus_attrs: []
+
+# --- BMI / weight focused ---
+# shape_prob: 0.3
+# n_extra_min: 1
+# n_extra_max: 2
+# focus_attrs: [bmi_proxy]
+
+# --- Detailed / measurement-rich ---
+# shape_prob: 0.5
+# n_extra_min: 4
+# n_extra_max: 7
+# focus_attrs: []

@@ -1,0 +1,54 @@
+# BodyShapeGPT Body-Shape-Focused Dataset Config
+#
+# Used by generate_body_shape_dataset.py
+#
+# Usage:
+#   python scripts/generate_body_shape_dataset.py --config config/body_shape_config.yaml
+
+# --- Output ---
+output: body_shape_dataset.jsonl
+gender: neutral
+
+# --- Shape distribution ---
+# Specify how many samples to generate for each body shape type.
+# Comment out a shape to exclude it.
+shapes:
+  hourglass:          2000
+  pear:               2000
+  apple:              2000
+  rectangle:          2000
+  inverted_triangle:  2000
+
+# --- Threshold calibration ---
+n_calib: 3000          # samples used to calibrate percentile thresholds
+
+# --- Optimisation ---
+# Each "batch" runs n_restarts parallel Adam optimisations.
+# Accepted candidates are those verified by classify_body_shape().
+n_restarts: 8          # parallel restarts per batch (more = more GPU parallelism)
+n_steps:    150        # Adam steps per batch
+lr:         0.05       # Adam learning rate
+reg_weight: 0.05       # L2 regularisation weight on betas (keeps them plausible)
+
+# --- Reproducibility ---
+seed: 42
+
+# --- Description style ---
+# shape_prob=1.0 means every description explicitly names the body shape type
+shape_prob:   1.0
+n_extra_min:  1        # min extra body attributes mentioned besides height
+n_extra_max:  2        # max extra body attributes mentioned besides height
+focus_attrs:  []       # always-include these attrs (e.g. [bmi_proxy])
+
+# --- Vocabulary overrides (optional) ---
+# Uncomment to load custom adjective / shape phrase vocabulary.
+# vocab_file: config/vocab_config.yaml
+
+# ---------------------------------------------------------------------------
+# Shape-specific ratio targets (reference, not used directly by the script)
+# ---------------------------------------------------------------------------
+#   hourglass          shoulder/hip ≈ 1.0,  waist/hip < 0.72
+#   pear               shoulder/hip < 0.83
+#   inverted_triangle  shoulder/hip > 1.22
+#   rectangle          shoulder/hip ≈ 1.0,  waist/hip > 0.88
+#   apple              waist_depth/height > 0.135,  hip/height > 0.22

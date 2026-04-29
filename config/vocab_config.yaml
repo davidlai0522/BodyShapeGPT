@@ -1,0 +1,61 @@
+# BodyShapeGPT Vocabulary Override Config
+#
+# Override specific entries in the ADJ and SHAPE_PHRASES tables.
+# Only the keys you list here are changed — everything else stays as the default.
+#
+# Valid attribute keys for `adj`:
+#   height, neck_length, arm_length, leg_length, shoulder_width,
+#   hip_width, waist_depth, chest_depth, arm_girth, leg_girth, bmi_proxy
+#
+# Valid category keys: very_low, low, average, high, very_high
+#
+# Valid shape keys for `shape_phrases`:
+#   hourglass, pear, apple, rectangle, inverted_triangle
+#
+# Usage:
+#   python scripts/generate_dataset.py --vocab-file config/vocab_config.yaml
+#   # or add  vocab_file: config/vocab_config.yaml  inside dataset_config.yaml
+
+# --- Adjective (attribute) overrides ---
+adj:
+  height:
+    very_low:  ["very short", "tiny", "extremely short"]
+    low:       ["short", "petite"]
+    average:   ["average height", "medium height"]
+    high:      ["tall", "above average height"]
+    very_high: ["very tall", "towering", "extremely tall"]
+
+  bmi_proxy:
+    very_low:  ["a very lean build", "a skinny frame", "very low body fat"]
+    low:       ["a lean build", "a slim build", "a slender figure"]
+    average:   ["an average build", "a medium build"]
+    high:      ["a stocky build", "a heavier build", "above-average body weight"]
+    very_high: ["a very heavy build", "an obese build", "extremely high body weight"]
+
+# Uncomment and edit other attributes as needed:
+#  shoulder_width:
+#    high:  ["broad shoulders", "wide shoulders", "powerful shoulders"]
+#    very_high: ["very broad shoulders", "extremely wide shoulders"]
+
+# --- Body shape phrase overrides ---
+shape_phrases:
+  hourglass:
+    - "an hourglass figure"
+    - "a classic hourglass shape"
+    - "balanced curves with a defined waist"
+  pear:
+    - "a pear-shaped figure"
+    - "wider at the hips than the shoulders"
+    - "a bottom-heavy build"
+  apple:
+    - "an apple-shaped figure"
+    - "weight concentrated in the midsection"
+    - "a rounder midsection"
+  rectangle:
+    - "a rectangular build"
+    - "a straight, athletic figure"
+    - "an even, balanced frame"
+  inverted_triangle:
+    - "an inverted triangle shape"
+    - "broad shoulders tapering to narrow hips"
+    - "a V-shaped build"

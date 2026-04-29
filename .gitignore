@@ -2,8 +2,11 @@
 *.vscode
 *.venv
 =*
+.claude
+.github
 weights_qwen
 weights/smpl*
 smpl/
 *.npy
 BodyShapeGPT_dataset_1M.jsonl
+archive/
