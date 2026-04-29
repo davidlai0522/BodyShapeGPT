@@ -59,7 +59,7 @@ torch.backends.cudnn.allow_tf32 = True
 MODEL_NAME   = "Qwen/Qwen2.5-0.5B"
 DATA_FILE    = "./BodyShapeGPT_dataset_1M.jsonl"
 CACHE_FILE   = "./embeddings_cache.pt"      # pre-computed text embeddings
-OUTPUT_DIR   = "./smpl_diffusion_v4_1"
+OUTPUT_DIR   = "./weights/smpl_diffusion_v4_1"
 DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 
 T            = 500       # diffusion timesteps — 500 is sufficient for 10D

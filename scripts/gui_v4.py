@@ -17,7 +17,7 @@ Right panel:
 
 Usage:
     python gui_v4.py [--gender neutral|male|female]
-                     [--checkpoint ./smpl_diffusion_v4]
+                     [--checkpoint ./weights/smpl_diffusion_v4]
                      [--cfg-scale 2.0]
                      [--ddim-steps 50]
 """
@@ -52,7 +52,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR   = os.path.dirname(_SCRIPT_DIR)
 
 DEFAULT_GENDER    = "neutral"
-DEFAULT_CKPT_DIR  = os.path.join(_ROOT_DIR, "smpl_diffusion_v4_1")
+DEFAULT_CKPT_DIR  = os.path.join(_ROOT_DIR, "weights/smpl_diffusion_v4_1")
 DEFAULT_CFG_SCALE = 2.0
 DEFAULT_DDIM      = 50
 
@@ -661,7 +661,7 @@ def main():
     )
     parser.add_argument(
         "--checkpoint", default=DEFAULT_CKPT_DIR,
-        help="Path to the smpl_diffusion_v4 checkpoint directory",
+        help="Path to the weights/smpl_diffusion_v4 checkpoint directory",
     )
     parser.add_argument(
         "--cfg-scale", type=float, default=DEFAULT_CFG_SCALE,

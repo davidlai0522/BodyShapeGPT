@@ -533,7 +533,7 @@ The best checkpoint (lowest `min_mse_norm`) is saved to `best_model.pt`. The tes
 from train_v4 import load_model_for_inference
 
 model, normalizer, tokenizer, sample_fn = load_model_for_inference(
-    checkpoint_dir="./smpl_diffusion_v4",
+    checkpoint_dir="./weights/smpl_diffusion_v4",
     cfg_scale=2.0,
     ddim_steps=50,
 )

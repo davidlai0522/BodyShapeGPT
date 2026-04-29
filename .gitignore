@@ -3,3 +3,6 @@
 *.venv
 =*
 weights_qwen
+weights/smpl*
+smpl/
+*.npyBodyShapeGPT_dataset_1M.jsonl
