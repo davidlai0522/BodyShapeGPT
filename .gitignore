@@ -5,8 +5,12 @@
 .claude
 .github
 weights_qwen
-weights/smpl*
+weights
 smpl/
 *.npy
-BodyShapeGPT_dataset_1M.jsonl
+
+# Dataset files — stored on HuggingFace Hub, not in git
+*.jsonl
+embeddings_cache.pt
+verify_out/
 archive/

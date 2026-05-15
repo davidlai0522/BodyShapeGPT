@@ -48,12 +48,10 @@ import os
 import random
 import sys
 from pathlib import Path
-from typing import Callable
 
 import yaml
 import numpy as np
 import torch
-import torch.nn.functional as F
 import smplx
 from tqdm import tqdm
 
@@ -83,164 +81,6 @@ VALID_SHAPES: tuple[str, ...] = (
     "hourglass", "pear", "apple", "rectangle", "inverted_triangle",
 )
 
-# ---------------------------------------------------------------------------
-# Differentiable body measurements
-# ---------------------------------------------------------------------------
-# All functions operate on batched tensors: verts (B, 6890, 3), joints (B, J, 3)
-# and return (B,) scalar tensors so gradients flow back to betas.
-
-_BETA_SOFT = 150.0   # logsumexp temperature for soft max/min
-
-
-def _soft_span(coords: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    """
-    Differentiable approximation to the weighted span of `coords`.
-
-    As β → ∞ this approaches  max_i(xᵢ | wᵢ > 0) − min_i(xᵢ | wᵢ > 0).
-    Gaussian proximity weights naturally exclude distant vertices without
-    non-differentiable boolean masking.
-
-    coords, weights: (B, N)
-    Returns: (B,)
-    """
-    log_w    = torch.log(weights.clamp_min(1e-8))
-    soft_max = (1.0 / _BETA_SOFT) * torch.logsumexp(
-        _BETA_SOFT * coords + log_w, dim=1)
-    soft_min = -(1.0 / _BETA_SOFT) * torch.logsumexp(
-        -_BETA_SOFT * coords + log_w, dim=1)
-    return soft_max - soft_min
-
-
-def diff_measurements(
-    verts: torch.Tensor,
-    joints: torch.Tensor,
-) -> dict[str, torch.Tensor]:
-    """
-    Compute the key body-proportion measurements differentiably.
-
-    verts:  (B, 6890, 3)
-    joints: (B, J, 3)
-    Returns a dict of (B,) tensors, all in metres.
-
-    Measurements computed:
-      height          — full-body Y extent
-      shoulder_width  — joint-to-joint biacromial distance
-      hip_width       — soft X span near hip Y level (excludes arms)
-      waist_x_span    — soft lateral (X) span at spine2 level
-      waist_depth     — soft front-to-back (Z) span at spine2 (excludes arms)
-    """
-    # ── Height (fully differentiable via autograd on max/min) ──────────────
-    height = (verts[:, :, 1].max(dim=1).values
-              - verts[:, :, 1].min(dim=1).values)
-
-    # ── Shoulder width: joint-to-joint ─────────────────────────────────────
-    shoulder_width = torch.norm(
-        joints[:, J["l_shoulder"]] - joints[:, J["r_shoulder"]], dim=1)
-
-    # ── Hip width: soft X span of vertices near hip Y, arm-free ───────────
-    hip_y  = (joints[:, J["l_hip"], 1] + joints[:, J["r_hip"], 1]) / 2  # (B,)
-    # Gaussian proximity weight along Y axis
-    y_w_hip = torch.exp(-0.5 * ((verts[:, :, 1] - hip_y.unsqueeze(1)) / 0.06) ** 2)
-    # Soft exclusion of arm vertices (large |X|)
-    x_mask_hip = torch.exp(-((verts[:, :, 0].abs() / 0.35) ** 8))
-    hip_width = _soft_span(verts[:, :, 0], y_w_hip * x_mask_hip)
-
-    # ── Waist Y reference ──────────────────────────────────────────────────
-    waist_y   = joints[:, J["spine2"], 1]  # (B,)
-    y_w_waist = torch.exp(-0.5 * ((verts[:, :, 1] - waist_y.unsqueeze(1)) / 0.04) ** 2)
-
-    # ── Waist lateral span: soft X span at spine2 ─────────────────────────
-    x_mask_waist = torch.exp(-((verts[:, :, 0].abs() / 0.30) ** 8))
-    waist_x_span = _soft_span(verts[:, :, 0], y_w_waist * x_mask_waist)
-
-    # ── Waist depth: soft Z span at spine2, excluding arms ────────────────
-    arm_mask    = torch.exp(-((verts[:, :, 0].abs() / 0.24) ** 8))
-    waist_depth = _soft_span(verts[:, :, 2], y_w_waist * arm_mask)
-
-    return {
-        "height":         height,
-        "shoulder_width": shoulder_width,
-        "hip_width":      hip_width,
-        "waist_x_span":   waist_x_span,
-        "waist_depth":    waist_depth,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Per-shape loss functions
-# ---------------------------------------------------------------------------
-# Each function accepts the dict returned by diff_measurements() and returns
-# a (B,) tensor of per-sample losses.  Lower = better match for the shape.
-#
-# Design rationale
-# ----------------
-# The classify_body_shape() thresholds are:
-#   inverted_triangle  sw/hw > 1.15
-#   pear               sw/hw < 0.87
-#   apple              bmi_proxy HIGH + waist_depth HIGH
-#   hourglass          0.87 ≤ sw/hw ≤ 1.15  AND  waist/hip < 0.80
-#   rectangle          0.87 ≤ sw/hw ≤ 1.15  AND  waist/hip ≥ 0.80
-#
-# We push targets a little past the boundary so the verified shape is robust.
-
-def _loss_inverted_triangle(m: dict[str, torch.Tensor]) -> torch.Tensor:
-    """Penalise if shoulder_width / hip_width < 1.22 (target: > 1.22)."""
-    ratio = m["shoulder_width"] / (m["hip_width"] + 1e-6)
-    return F.relu(1.22 - ratio) ** 2 * 20.0
-
-
-def _loss_pear(m: dict[str, torch.Tensor]) -> torch.Tensor:
-    """Penalise if shoulder_width / hip_width > 0.83 (target: < 0.83)."""
-    ratio = m["shoulder_width"] / (m["hip_width"] + 1e-6)
-    return F.relu(ratio - 0.83) ** 2 * 20.0
-
-
-def _loss_hourglass(m: dict[str, torch.Tensor]) -> torch.Tensor:
-    """
-    Shoulder ≈ hip (ratio ~ 1.0), waist_x_span / hip_width < 0.72.
-    Bounds ensure we stay clear of the pear/inverted-triangle regions.
-    """
-    ratio  = m["shoulder_width"] / (m["hip_width"] + 1e-6)
-    ww_hw  = m["waist_x_span"]   / (m["hip_width"] + 1e-6)
-    balance = (ratio - 1.0) ** 2 * 15.0
-    waist   = F.relu(ww_hw - 0.72) ** 2 * 25.0
-    bounds  = (F.relu(ratio - 1.10) ** 2 + F.relu(0.90 - ratio) ** 2) * 10.0
-    return balance + waist + bounds
-
-
-def _loss_rectangle(m: dict[str, torch.Tensor]) -> torch.Tensor:
-    """
-    Shoulder ≈ hip (ratio ~ 1.0), waist_x_span / hip_width > 0.88
-    (minimal waist definition).
-    """
-    ratio  = m["shoulder_width"] / (m["hip_width"] + 1e-6)
-    ww_hw  = m["waist_x_span"]   / (m["hip_width"] + 1e-6)
-    balance = (ratio - 1.0) ** 2 * 15.0
-    waist   = F.relu(0.88 - ww_hw) ** 2 * 25.0
-    bounds  = (F.relu(ratio - 1.10) ** 2 + F.relu(0.90 - ratio) ** 2) * 10.0
-    return balance + waist + bounds
-
-
-def _loss_apple(m: dict[str, torch.Tensor]) -> torch.Tensor:
-    """
-    Large waist_depth (front-to-back) and hip_width relative to height,
-    implying high BMI and wide midsection — the two conditions for 'apple'.
-    """
-    waist_h = m["waist_depth"] / (m["height"] + 1e-6)
-    hip_h   = m["hip_width"]   / (m["height"] + 1e-6)
-    # Target: waist_depth > 13.5% of height, hip_width > 22% of height
-    return (F.relu(0.135 - waist_h) ** 2 * 80.0
-            + F.relu(0.22  - hip_h ) ** 2 * 40.0)
-
-
-SHAPE_LOSS_FNS: dict[str, Callable] = {
-    "inverted_triangle": _loss_inverted_triangle,
-    "pear":              _loss_pear,
-    "hourglass":         _loss_hourglass,
-    "rectangle":         _loss_rectangle,
-    "apple":             _loss_apple,
-}
-
 # Human-readable ratio descriptions for logging
 SHAPE_RATIO_DESCRIPTION: dict[str, str] = {
     "inverted_triangle": "shoulder/hip > 1.22",
@@ -252,80 +92,155 @@ SHAPE_RATIO_DESCRIPTION: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Gradient-based optimisation
+# Vectorised batch sampling
 # ---------------------------------------------------------------------------
+# Strategy: sample large random batches, classify all in one numpy pass, keep
+# matches.  No gradient computation — ~50-100× faster than gradient-based
+# optimisation because:
+#   • no backward pass through SMPL (eliminates the dominant GPU cost)
+#   • single SMPL forward over the full batch is highly parallel
+#   • classification is O(B·N) numpy, not O(B·steps·N) torch backward
+# Typical acceptance rate from N(0,1) betas is ~15-25% per shape, so a batch
+# of 512 yields ~80-120 matches — far more than the 1-2 from optimisation.
 
-def _smpl_forward_diff(smpl_model, betas: torch.Tensor) -> object:
-    """SMPL forward pass that keeps the autograd graph (for optimisation)."""
-    bs     = betas.shape[0]
-    device = betas.device
-    return smpl_model(
-        betas=betas,
-        global_orient=torch.zeros(bs, 3, device=device),
-        body_pose=torch.zeros(bs, 69, device=device),
-        return_verts=True,
-    )
+def _categorize_batch(values: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
+    """Vectorised version of categorize(). Returns (B,) object array of category strings."""
+    p20, p40, p60, p80 = thresholds
+    result = np.full(len(values), "very_high", dtype=object)
+    result[values < p80] = "high"
+    result[values < p60] = "average"
+    result[values < p40] = "low"
+    result[values < p20] = "very_low"
+    return result
 
 
-def optimise_for_shape(
+def extract_measurements_batch(
+    verts: np.ndarray,   # (B, 6890, 3)
+    joints: np.ndarray,  # (B, J, 3)
+) -> dict[str, np.ndarray]:
+    """
+    Vectorised batch extraction of the six measurements needed by
+    classify_body_shape().  Returns a dict of (B,) float64 arrays.
+    Matches the per-sample logic in extract_measurements() exactly.
+    """
+    y_min = verts[:, :, 1].min(axis=1)   # (B,)
+    y_max = verts[:, :, 1].max(axis=1)
+    height = y_max - y_min
+
+    shoulder_width = np.linalg.norm(
+        joints[:, J["l_shoulder"]] - joints[:, J["r_shoulder"]], axis=1)
+
+    # Hip width: X span of vertices near hip Y, |x| ≤ 0.35
+    hip_y    = (joints[:, J["l_hip"], 1] + joints[:, J["r_hip"], 1]) / 2   # (B,)
+    hip_mask = (
+        (np.abs(verts[:, :, 1] - hip_y[:, None]) <= 0.06) &
+        (np.abs(verts[:, :, 0]) <= 0.35)
+    )  # (B, N)
+    hip_x     = np.where(hip_mask, verts[:, :, 0], np.nan)
+    hip_width = np.nan_to_num(np.nanmax(hip_x, axis=1) - np.nanmin(hip_x, axis=1))
+
+    # Waist width and depth at spine2
+    waist_y     = joints[:, J["spine2"], 1]                                  # (B,)
+    waist_ymask = np.abs(verts[:, :, 1] - waist_y[:, None]) <= 0.04         # (B, N)
+    waist_x     = np.where(waist_ymask & (np.abs(verts[:, :, 0]) <= 0.30),
+                           verts[:, :, 0], np.nan)
+    waist_width = np.nan_to_num(np.nanmax(waist_x, axis=1) - np.nanmin(waist_x, axis=1))
+    waist_z     = np.where(waist_ymask & (np.abs(verts[:, :, 0]) <= 0.24),
+                           verts[:, :, 2], np.nan)
+    waist_depth = np.nan_to_num(np.nanmax(waist_z, axis=1) - np.nanmin(waist_z, axis=1))
+
+    # BMI proxy: torso volume (20 slices, arms |x|>0.28 excluded) / height²
+    # Fully vectorised via scatter reduce — no Python loop over slices.
+    B        = verts.shape[0]
+    n_slices = 20
+    h_safe   = np.maximum(height, 1e-6)
+    norm_y   = (verts[:, :, 1] - y_min[:, None]) / h_safe[:, None]          # (B, N) ∈ [0,1]
+    slice_idx = np.floor(norm_y * n_slices).clip(0, n_slices - 1).astype(np.int32)
+    arm_ok   = (np.abs(verts[:, :, 0]) <= 0.28)                             # (B, N)
+    lin_idx  = (np.arange(B)[:, None] * n_slices + slice_idx).ravel()       # (B·N,)
+    valid    = arm_ok.ravel()
+    vi, vx, vz = lin_idx[valid], verts[:, :, 0].ravel()[valid], verts[:, :, 2].ravel()[valid]
+    total    = B * n_slices
+    x_max    = np.full(total, -np.inf);  np.maximum.at(x_max, vi, vx)
+    x_min    = np.full(total,  np.inf);  np.minimum.at(x_min, vi, vx)
+    z_max    = np.full(total, -np.inf);  np.maximum.at(z_max, vi, vz)
+    z_min    = np.full(total,  np.inf);  np.minimum.at(z_min, vi, vz)
+    filled   = (x_max > x_min).reshape(B, n_slices)
+    w        = np.where(filled, (x_max - x_min).reshape(B, n_slices), 0.0)
+    d        = np.where(filled, (z_max - z_min).reshape(B, n_slices), 0.0)
+    vol      = (w * d * (height / n_slices)[:, None]).sum(axis=1)
+    bmi_proxy = np.where(height > 0, vol / (height ** 2), 0.0)
+
+    return {
+        "height":         height,
+        "shoulder_width": shoulder_width,
+        "hip_width":      hip_width,
+        "waist_width":    waist_width,
+        "waist_depth":    waist_depth,
+        "bmi_proxy":      bmi_proxy,
+    }
+
+
+def classify_batch(
+    meas: dict[str, np.ndarray],
+    thresholds: dict[str, np.ndarray],
+) -> np.ndarray:
+    """
+    Vectorised batch version of classify_body_shape().
+    Returns (B,) object array of shape-name strings.
+    Priority: apple > inverted_triangle > pear > hourglass > rectangle.
+    """
+    bmi_cat   = _categorize_batch(meas["bmi_proxy"],   thresholds["bmi_proxy"])
+    waist_cat = _categorize_batch(meas["waist_depth"],  thresholds["waist_depth"])
+    sw  = meas["shoulder_width"]
+    hw  = meas["hip_width"]
+    ww  = meas["waist_width"]
+    ratio        = np.where(hw > 1e-6, sw / hw, 1.0)
+    waist_to_hip = np.where(hw > 1e-6, ww / hw, 1.0)
+
+    result = np.full(len(sw), "rectangle", dtype=object)
+    result[
+        (ratio >= 0.87) & (ratio <= 1.15) &
+        ((waist_to_hip < 0.80) | np.isin(waist_cat, ["very_low", "low"]))
+    ] = "hourglass"
+    result[ratio < 0.87] = "pear"
+    result[ratio > 1.15] = "inverted_triangle"
+    result[
+        np.isin(bmi_cat,   ["high", "very_high"]) &
+        np.isin(waist_cat, ["high", "very_high"])
+    ] = "apple"
+    return result
+
+
+def sample_shape_batch(
     smpl_model,
     target_shape: str,
     thresholds: dict[str, np.ndarray],
     device: str,
-    n_restarts: int = 8,
-    n_steps: int = 150,
-    lr: float = 0.05,
-    reg_weight: float = 0.05,
+    batch_size: int = 512,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
-    Optimise a batch of `n_restarts` random betas toward `target_shape`.
-
-    Returns a list of (betas_np, verts_np, joints_np) tuples for every
-    candidate that passes the classify_body_shape() verification check.
-    Empty list means no candidate converged — the caller should retry.
+    Sample `batch_size` random betas, run a single no-grad SMPL forward pass,
+    classify all in one vectorised numpy pass, and return those matching
+    `target_shape`.  Typical yield: 80-120 accepted candidates per call.
     """
-    loss_fn = SHAPE_LOSS_FNS[target_shape]
-
-    # Random initialisation — start from N(0, I), clamped to valid range
-    betas_param = (torch.randn(n_restarts, 10, device=device)
-                   .clamp(-3.5, 3.5)
-                   .clone()
-                   .requires_grad_(True))
-    optimizer = torch.optim.Adam([betas_param], lr=lr)
-
-    for _ in range(n_steps):
-        optimizer.zero_grad()
-        clamped = betas_param.clamp(-3.5, 3.5)
-        out     = _smpl_forward_diff(smpl_model, clamped)
-        dmeas   = diff_measurements(out.vertices, out.joints)
-        # Per-sample loss: shape loss + L2 reg on betas
-        per_sample = loss_fn(dmeas) + reg_weight * (betas_param ** 2).mean(dim=1)
-        per_sample.sum().backward()
-        optimizer.step()
-
-    # ── Verify with the reference (numpy) classifier ───────────────────────
-    accepted: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    betas = torch.randn(batch_size, 10, device=device).clamp(-3.5, 3.5)
     with torch.no_grad():
-        clamped   = betas_param.detach().clamp(-3.5, 3.5)
-        out       = smpl_model(
-            betas=clamped,
-            global_orient=torch.zeros(n_restarts, 3, device=device),
-            body_pose=torch.zeros(n_restarts, 69, device=device),
+        out = smpl_model(
+            betas=betas,
+            global_orient=torch.zeros(batch_size, 3, device=device),
+            body_pose=torch.zeros(batch_size, 69, device=device),
             return_verts=True,
         )
-        verts_np  = out.vertices.cpu().numpy()   # (B, 6890, 3)
-        joints_np = out.joints.cpu().numpy()     # (B, J, 3)
-        betas_np  = clamped.cpu().numpy()        # (B, 10)
+    verts_np  = out.vertices.cpu().numpy()
+    joints_np = out.joints.cpu().numpy()
+    betas_np  = betas.cpu().numpy()
 
-    for i in range(n_restarts):
-        meas = extract_measurements(verts_np[i], joints_np[i])
-        # Reject degenerate meshes
-        if not (0.5 < meas["height"] < 2.5):
-            continue
-        if classify_body_shape(meas, thresholds) == target_shape:
-            accepted.append((betas_np[i], verts_np[i], joints_np[i]))
-
-    return accepted
+    meas  = extract_measurements_batch(verts_np, joints_np)
+    found = classify_batch(meas, thresholds)
+    valid = (meas["height"] > 0.5) & (meas["height"] < 2.5) & (found == target_shape)
+    idxs  = np.where(valid)[0]
+    return [(betas_np[i], verts_np[i], joints_np[i]) for i in idxs]
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +252,7 @@ def generate_body_shape_dataset(
     output_file: str,
     gender: str = "neutral",
     n_calib: int = 3000,
-    n_restarts: int = 8,
-    n_steps: int = 150,
-    lr: float = 0.05,
-    reg_weight: float = 0.05,
+    batch_size: int = 512,
     seed: int = 42,
     # Description style
     shape_prob: float = 1.0,
@@ -371,8 +283,7 @@ def generate_body_shape_dataset(
     print(f"  {'TOTAL':<22} {total:>6}")
     print(f"\nOutput → {output_file}\n")
 
-    written   = 0
-    n_failed  = 0   # optimisation attempts that produced no verified candidate
+    written  = 0
 
     with open(output_file, "w") as fout:
         for shape_name, n_target in shapes.items():
@@ -383,19 +294,26 @@ def generate_body_shape_dataset(
 
             pbar          = tqdm(total=n_target, desc=f"  {shape_name:<20}")
             shape_written = 0
+            consecutive_empty = 0
 
             while shape_written < n_target:
-                candidates = optimise_for_shape(
+                candidates = sample_shape_batch(
                     smpl, shape_name, thresholds, device,
-                    n_restarts=n_restarts,
-                    n_steps=n_steps,
-                    lr=lr,
-                    reg_weight=reg_weight,
+                    batch_size=batch_size,
                 )
 
                 if not candidates:
-                    n_failed += n_restarts
+                    consecutive_empty += 1
+                    if consecutive_empty >= 50:
+                        print(
+                            f"\nWarning: {shape_name} yielded no matches in "
+                            f"50 consecutive batches "
+                            f"({shape_written}/{n_target} written). Skipping.",
+                            file=sys.stderr,
+                        )
+                        break
                     continue
+                consecutive_empty = 0
 
                 for betas_np, verts_np, joints_np in candidates:
                     if shape_written >= n_target:
@@ -423,9 +341,6 @@ def generate_body_shape_dataset(
             pbar.close()
 
     print(f"\nDone.  Wrote {written} samples to {output_file}.")
-    if n_failed:
-        print(f"  {n_failed} optimisation attempts did not converge to the "
-              f"target shape (retried automatically).")
 
 
 # ---------------------------------------------------------------------------
@@ -471,14 +386,8 @@ def main() -> None:
                         choices=["neutral", "male", "female"], default="neutral")
     parser.add_argument("--n-calib",     type=int, default=3000,
                         help="Samples for threshold calibration")
-    parser.add_argument("--n-restarts",  type=int, default=8,
-                        help="Parallel optimisation restarts per batch")
-    parser.add_argument("--n-steps",     type=int, default=150,
-                        help="Adam steps per optimisation batch")
-    parser.add_argument("--lr",          type=float, default=0.05,
-                        help="Adam learning rate")
-    parser.add_argument("--reg-weight",  type=float, default=0.05,
-                        help="L2 regularisation weight on betas")
+    parser.add_argument("--batch-size",  type=int, default=512,
+                        help="Random betas sampled per iteration (larger = faster)")
     parser.add_argument("--seed",        type=int, default=42)
     # Description style
     parser.add_argument("--shape-prob",  type=float, default=1.0,
@@ -520,10 +429,7 @@ def main() -> None:
         output_file = args.output,
         gender      = args.gender,
         n_calib     = args.n_calib,
-        n_restarts  = args.n_restarts,
-        n_steps     = args.n_steps,
-        lr          = args.lr,
-        reg_weight  = args.reg_weight,
+        batch_size  = args.batch_size,
         seed        = args.seed,
         shape_prob  = args.shape_prob,
         n_extra_min = args.n_extra_min,

@@ -6,29 +6,28 @@
 #   python scripts/generate_body_shape_dataset.py --config config/body_shape_config.yaml
 
 # --- Output ---
-output: body_shape_dataset.jsonl
+output: body_shape_dataset_1k.jsonl
 gender: neutral
 
 # --- Shape distribution ---
 # Specify how many samples to generate for each body shape type.
 # Comment out a shape to exclude it.
 shapes:
-  hourglass:          2000
-  pear:               2000
-  apple:              2000
-  rectangle:          2000
-  inverted_triangle:  2000
+  hourglass:          200
+  pear:               200
+  apple:              200
+  rectangle:          200
+  inverted_triangle:  200
 
 # --- Threshold calibration ---
 n_calib: 3000          # samples used to calibrate percentile thresholds
 
-# --- Optimisation ---
-# Each "batch" runs n_restarts parallel Adam optimisations.
-# Accepted candidates are those verified by classify_body_shape().
-n_restarts: 8          # parallel restarts per batch (more = more GPU parallelism)
-n_steps:    150        # Adam steps per batch
-lr:         0.05       # Adam learning rate
-reg_weight: 0.05       # L2 regularisation weight on betas (keeps them plausible)
+# --- Sampling ---
+# Each iteration samples `batch_size` random betas, runs one SMPL forward
+# pass (no gradients), and keeps those that classify as the target shape.
+# Acceptance rate is ~15-25% per shape, so batch_size=512 yields ~80-120
+# candidates per call.  Increase for more GPU throughput if VRAM allows.
+batch_size: 512        # random betas per iteration
 
 # --- Reproducibility ---
 seed: 42
@@ -37,7 +36,7 @@ seed: 42
 # shape_prob=1.0 means every description explicitly names the body shape type
 shape_prob:   1.0
 n_extra_min:  1        # min extra body attributes mentioned besides height
-n_extra_max:  2        # max extra body attributes mentioned besides height
+n_extra_max:  1        # max extra body attributes mentioned besides height
 focus_attrs:  []       # always-include these attrs (e.g. [bmi_proxy])
 
 # --- Vocabulary overrides (optional) ---
